@@ -1,0 +1,26 @@
+{
+  "name": "dlunch",
+  "version": "1.0.0",
+  "description": "An app for helping people decide where to go for lunch",
+  "main": "",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "truffle test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scarvalhojr/dlunch.git"
+  },
+  "author": "Sergio de Carvalho",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/scarvalhojr/dlunch/issues"
+  },
+  "homepage": "https://github.com/scarvalhojr/dlunch#readme",
+  "devDependencies": {
+    "truffle-assertions": "^0.4.0"
+  }
+}

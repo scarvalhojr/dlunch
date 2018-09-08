@@ -7,9 +7,11 @@ contract Eateries {
     uint    distMeters;
   }
 
+  // List of registered eateries
   Eatery[] eateries;
 
-  event NewEatery(uint);
+  // Event when a new eatery is registered
+  event NewEatery(uint eateryID);
 
   function getNumEateries ()
     external
@@ -22,11 +24,8 @@ contract Eateries {
   function addEatery (string name, uint distMeters)
     external
   {
-    eateries.push(Eatery(name, distMeters));
-
-    // TODO: emit event
-    // uint eatingID = eateries.push(Eatery(name, distMeters)) - 1;
-    // emit NewEatery(eatingID);
+    uint eatingID = eateries.push(Eatery(name, distMeters)) - 1;
+    emit NewEatery(eatingID);
   }
 
   function isValidEateryID (uint eateryID)
