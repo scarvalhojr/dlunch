@@ -1,10 +1,11 @@
 pragma solidity ^0.4.23;
 
+import "./Eaters.sol";
 import "./Eateries.sol";
 
 contract DLunch {
 
-  // Name of each instance of a deployed contract
+  // Name associated with a deployed contract
   string public name;
 
   // Minimum amount of time ahead needed to propose eating events (in seconds)
@@ -16,7 +17,13 @@ contract DLunch {
   // Associated Eateries contract with list of known eateries
   Eateries public eateries;
 
-  // The three possible states of eating proposals
+  // Associated Eaters contract with list of registered eaters
+  Eaters public eaters;
+
+  // Mapping of eater addresses to token balances
+  mapping (address => uint) eaterBalance;
+
+  // The possible states of eating proposals
   enum EatingState { Proposed, Decided, Cancelled }
 
   // Structure of eating proposals
@@ -30,30 +37,55 @@ contract DLunch {
   // List of eating proposals
   Eating[] eatings;
 
-  // An event when a new eating is proposed
-  event NewEating(uint);
+  // When a new eating is proposed
+  event NewEating(uint eatingID);
 
-  // An event when an eating is decided
-  event EatingDecided(uint);
+  // When an eating is decided
+  event EatingDecided(uint eatingID);
 
-  // An event when an eating is cancelled because not enough eaters joined
-  event EatingCancelled(uint);
-
-  // balance of Eater tokens of all eaters
-  mapping (address => uint) eaterBalances;
+  // When an eating is cancelled because not enough eaters joined
+  event EatingCancelled(uint eatingID);
 
   constructor (
     string _name,
     uint _minProposalTimeSec,
-    uint _minNumEaters,
-    address eateriesAddress
+    uint _minNumEaters
   )
     public
   {
     name = _name;
     minProposalTimeSec = _minProposalTimeSec;
     minNumEaters = _minNumEaters;
-    eateries = Eateries(eateriesAddress);
+    eateries = new Eateries();
+    eaters = new Eaters();
+  }
+
+  modifier registeredEater (address eaterAddress)
+  {
+    require(eaters.isRegistered(eaterAddress),
+      "Eater suspended or not registered.");
+    _;
+  }
+
+  modifier validEateryID (uint eatingID)
+  {
+    require(eateries.isValidEateryID(eatingID), "Unknown eatery.");
+    _;
+  }
+
+  modifier validEatingID (uint eatingID)
+  {
+    require(eatingID < eatings.length, "Unknown eating.");
+    _;
+  }
+
+  function getEaterBalance (address eaterAddress)
+    external
+    view
+    registeredEater(eaterAddress)
+    returns(uint)
+  {
+    return eaterBalance[eaterAddress];
   }
 
   function getNumEatings ()
@@ -77,16 +109,10 @@ contract DLunch {
     // emit NewEating(eatingID);
   }
 
-  modifier isValidEatingID (uint eatingID)
-  {
-    require(eatingID < eatings.length, "Unknown eating plan.");
-    _;
-  }
-
   function getEatingProposal (uint eatingID)
     external
     view
-    isValidEatingID(eatingID)
+    validEatingID(eatingID)
     returns(uint, EatingState)
   {
     Eating storage eating = eatings[eatingID];
@@ -95,9 +121,9 @@ contract DLunch {
 
   function joinEating (uint eatingID, uint suggestedEateryID)
     external
-    isValidEatingID(eatingID)
+    validEatingID(eatingID)
+    validEateryID(suggestedEateryID)
   {
-    require(eateries.isValidEateryID(suggestedEateryID), "Unknown eatery ID.");
     Eating storage eating = eatings[eatingID];
     require(eating.state == EatingState.Proposed,
       "Unable to join eating as it is already decided or cancelled.");
@@ -107,7 +133,7 @@ contract DLunch {
   function getEatingDecision (uint eatingID)
     external
     view
-    isValidEatingID(eatingID)
+    validEatingID(eatingID)
     returns(uint, uint)
   {
     Eating storage eating = eatings[eatingID];
@@ -117,8 +143,8 @@ contract DLunch {
   }
 
   function decideEating (uint eatingID)
-    public
-    isValidEatingID(eatingID)
+    external
+    validEatingID(eatingID)
   {
     Eating storage eating = eatings[eatingID];
     require(eating.state == EatingState.Proposed,
