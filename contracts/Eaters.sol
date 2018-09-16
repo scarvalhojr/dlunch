@@ -21,8 +21,8 @@ contract Eaters {
   // When an eater is unsuspended
   event EaterUnsuspended(address eaterAddress);
 
-  constructor () public {
-    owner = msg.sender;
+  constructor (address _owner) public {
+    owner = _owner;
   }
 
   modifier ownerOnly ()

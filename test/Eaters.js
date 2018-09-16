@@ -7,14 +7,14 @@ contract("Eaters", (accounts) => {
   const UnknownEaterState = 0;
   const RegisteredEaterState = 1;
   const SuspendedEaterState = 2;
-  let esters;
+  let eaters;
 
   // Build up a new Eaters contract before each test
   beforeEach(async () => {
-    eaters = await Eaters.new({from: contractOwner});
+    eaters = await Eaters.new(contractOwner);
   });
 
-  it("should let owner register, suspend, and unsuspend eaters", async () => {
+  it("lets owner register, suspend, and unsuspend eaters", async () => {
     let state;
 
     let tx1 = await eaters.registerEater(accounts[1], {from: contractOwner});
