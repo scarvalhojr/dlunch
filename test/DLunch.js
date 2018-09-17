@@ -8,7 +8,8 @@ contract("DLunch", (accounts) => {
   // TODO: mock block timestamp to avoid timing issues
 
   const contractName = "Contract Name";
-  const minProposalTimeSec = 1;
+  const utcOffsetHours = 1;
+  const minDecisionTimeSec = 1;
   const normalProposalTimeSec = 5;
   const eatery1 = 1;
   const eatery2 = 2;
@@ -19,7 +20,7 @@ contract("DLunch", (accounts) => {
 
   // Build a new DLunch contract, register eaters and eateries before each test
   beforeEach(async () => {
-    dlunch = await DLunch.new(contractName, minProposalTimeSec);
+    dlunch = await DLunch.new(contractName, utcOffsetHours, minDecisionTimeSec);
     let eatersAddress = await dlunch.eaters.call();
     eaters = Eaters.at(eatersAddress);
     let eateriesAddress = await dlunch.eateries.call();
@@ -42,8 +43,8 @@ contract("DLunch", (accounts) => {
     let _name = await dlunch.name.call();
     assert.equal(contractName, _name, "unexpected contract name");
 
-    let _minTime = await dlunch.minProposalTimeSec.call();
-    assert.equal(minProposalTimeSec, _minTime,
+    let _minTime = await dlunch.minDecisionTimeSec.call();
+    assert.equal(minDecisionTimeSec, _minTime,
       "unexpected minimum proposal time setting");
   });
 
@@ -92,7 +93,7 @@ contract("DLunch", (accounts) => {
 
   it("rejects eating if decision time is too soon", async () => {
     let now = web3.eth.getBlock(web3.eth.blockNumber).timestamp;
-    let decisionTime = now + minProposalTimeSec - 1;
+    let decisionTime = now + minDecisionTimeSec - 1;
     let closingTime = decisionTime;
     let tooSoon = false;
 
@@ -153,6 +154,91 @@ contract("DLunch", (accounts) => {
     assert.equal(resp[3], 0, "unexpected number of joined eaters");
   });
 
+  it("rejects too many eating events in the same day", async () => {
+    let now = web3.eth.getBlock(web3.eth.blockNumber).timestamp;
+    let tomorrow = 1 + Math.floor(now / (24 * 60 * 60));
+    let decisionTime = tomorrow * 24 * 60 * 60 - utcOffsetHours * 3600;
+    let closingTime = decisionTime + 600;
+    let allowedEatings = await dlunch.maxEatingsPerDay.call();
+    let rejected;
+    let tx;
+
+    for (i = 0; i < allowedEatings; i++) {
+      tx = await dlunch.proposeEating(decisionTime, closingTime);
+      truffleAssert.eventEmitted(tx, "NewEating", (ev) => {
+        return (ev.decisionTime == decisionTime) &&
+          (ev.closingTime == closingTime);
+      });
+
+      // Add 1 hour for next eating
+      decisionTime += 3600;
+      closingTime += 3600;
+    }
+
+    try {
+      rejected = false;
+      tx = await dlunch.proposeEating(decisionTime, closingTime);
+    } catch (error) {
+      assert.include(error.message, "Maximum number of eatings reached");
+      rejected = true;
+    }
+    assert.equal(rejected, true, "eating should have been rejected");
+  });
+
+  it("rejects free vote on the same eatery", async () => {
+    let now = web3.eth.getBlock(web3.eth.blockNumber).timestamp;
+    let decisionTime = now + normalProposalTimeSec;
+    let closingTime = decisionTime + 30;
+    let tx, rejected;
+
+    await dlunch.proposeEating(decisionTime, closingTime);
+    await dlunch.joinEating(decisionTime, eatery1, {from: accounts[0]});
+    await dlunch.joinEating(decisionTime, eatery1, {from: accounts[1]});
+    await dlunch.joinEating(decisionTime, eatery1, {from: accounts[2]});
+
+    tx = await dlunch.joinEating(decisionTime, eatery1, {from: accounts[3]});
+    truffleAssert.eventEmitted(tx, "EaterJoined", (ev) => {
+      return (ev.decisionTime == decisionTime) && (ev.eater == accounts[3]) &&
+        (ev.suggestedEateryID == eatery1);
+    });
+
+    // Voting on a different eatery is okay
+    tx = await dlunch.freeVote(decisionTime, eatery2, {from: accounts[3]});
+    truffleAssert.eventEmitted(tx, "EateryVoted", (ev) => {
+      return (ev.decisionTime == decisionTime) && (ev.eater == accounts[3]) &&
+        (ev.eateryID == eatery2);
+    });
+
+    // This eater has already voted on eatery 1, so this free vote should
+    // be rejected
+    try {
+      rejected = false;
+      tx = await dlunch.freeVote(decisionTime, eatery1, {from: accounts[3]});
+    } catch (error) {
+      rejected = true;
+    }
+    assert.equal(rejected, true,
+      "free vote on same eatery should have been rejected");
+
+    // This eater has already voted on eatery 2, so this free vote should
+    // be rejected
+    try {
+      rejected = false;
+      tx = await dlunch.freeVote(decisionTime, eatery2, {from: accounts[3]});
+    } catch (error) {
+      rejected = true;
+    }
+    assert.equal(rejected, true,
+      "free vote on same eatery should have been rejected");
+
+    // Voting on a different eatery is okay
+    tx = await dlunch.freeVote(decisionTime, eatery3, {from: accounts[3]});
+    truffleAssert.eventEmitted(tx, "EateryVoted", (ev) => {
+      return (ev.decisionTime == decisionTime) && (ev.eater == accounts[3]) &&
+        (ev.eateryID == eatery3);
+    });
+  });
+
   it("rejects unregistered eaters to join eating", async () => {
     let now = web3.eth.getBlock(web3.eth.blockNumber).timestamp;
     let decisionTime = now + normalProposalTimeSec;
@@ -184,7 +270,7 @@ contract("DLunch", (accounts) => {
 
   it("decides eating and gives token to winner", async () => {
     let now = web3.eth.getBlock(web3.eth.blockNumber).timestamp;
-    let decisionTime = now + minProposalTimeSec;
+    let decisionTime = now + minDecisionTimeSec;
     let closingTime = decisionTime + 30;
     let balance, resp;
 
@@ -210,19 +296,23 @@ contract("DLunch", (accounts) => {
     resp = await dlunch.getOpenEatingProposal.call(decisionTime);
     assert.equal(resp[1], eatery3, "unexpected winning eatery");
 
-    await dlunch.freeVote(decisionTime, eatery3, {from: accounts[2]});
+    await dlunch.freeVote(decisionTime, eatery2, {from: accounts[2]});
+    resp = await dlunch.getOpenEatingProposal.call(decisionTime);
+    assert.equal(resp[1], eatery2, "unexpected winning eatery");
+
+    await dlunch.joinEating(decisionTime, eatery3, {from: accounts[3]});
     resp = await dlunch.getOpenEatingProposal.call(decisionTime);
     assert.equal(resp[1], eatery3, "unexpected winning eatery");
 
-    await dlunch.joinEating(decisionTime, eatery4, {from: accounts[3]});
-    resp = await dlunch.getOpenEatingProposal.call(decisionTime);
-    assert.equal(resp[1], eatery3, "unexpected winning eatery");
-
-    await dlunch.freeVote(decisionTime, eatery4, {from: accounts[0]});
+    await dlunch.freeVote(decisionTime, eatery4, {from: accounts[3]});
     resp = await dlunch.getOpenEatingProposal.call(decisionTime);
     assert.equal(resp[1], eatery3, "unexpected winning eatery");
 
     await dlunch.freeVote(decisionTime, eatery4, {from: accounts[1]});
+    resp = await dlunch.getOpenEatingProposal.call(decisionTime);
+    assert.equal(resp[1], eatery3, "unexpected winning eatery");
+
+    await dlunch.freeVote(decisionTime, eatery4, {from: accounts[0]});
     resp = await dlunch.getOpenEatingProposal.call(decisionTime);
     assert.equal(resp[1], eatery3, "unexpected winning eatery");
 
@@ -235,7 +325,7 @@ contract("DLunch", (accounts) => {
       return (ev.decisionTime == decisionTime) && (ev.eateryID == eatery4) &&
              (ev.winningEater == accounts[3]);
     });
-  
+
     balance = await dlunch.checkMyBalance.call({from: accounts[0]});
     assert.equal(balance, 0, "unexpected balance of account 0");
 

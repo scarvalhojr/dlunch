@@ -8,21 +8,23 @@ contract DLunch {
   // Name associated with the deployed contract
   string public name;
 
+  // Time zone for mapping timestamps to days
+  int public utcOffsetHours;
+
   // Minimum amount of time ahead needed to propose eating events (in seconds)
-  uint public minProposalTimeSec;
+  uint public minDecisionTimeSec;
 
   // Maximum amount of time eatings can allow eaters to join or vote after
   // decision time (30min); eatings cannot be cancelled before closing time
   uint public constant maxClosingTimeSec = 30 * 60;
 
-  // TODO: enforce maxEatingsPerDay
   // Maximum number of eating events allowed in the same day
   uint public constant maxEatingsPerDay = 2;
 
   // Minimum number of eaters needed for an eating event to be confirmed
   uint public constant minNumEaters = 3;
 
-  // How many tokens it costs to vote for an eatery beyond free votes
+  // How many Eater tokens it costs to vote for an eatery beyond free votes
   uint public constant paidVoteCost = 2;
 
   // Associated Eateries contract with list of known eateries
@@ -42,17 +44,19 @@ contract DLunch {
     uint closingTime;
     EatingState state;
     uint winningEateryID;
-    uint winningDistance;
+    uint winningEateryDist;
     uint numEaters;
-    mapping (address => uint) numFreeVotes;
-    // TODO: prevent eaters voting on the same eatery for free
-    // mapping (address + uint => bool) suggested;
-    mapping (uint => address) proposer;
-    mapping (uint => uint) votes;
+    mapping (address => uint) eaterFreeVoteCount;
+    mapping (bytes32 => bool) eaterToEateryFreeVote;
+    mapping (uint => address) eateryProposer;
+    mapping (uint => uint) eateryVoteCount;
   }
 
   // Eating proposals indexed by decision time
   mapping (uint => Eating) eatings;
+
+  // Number of eating events proposed in a day
+  mapping (uint => uint) numEatings;
 
   // When a new eating is proposed
   event NewEating(uint decisionTime, uint closingTime);
@@ -60,24 +64,28 @@ contract DLunch {
   // When an eater joins an eating plan
   event EaterJoined(uint decisionTime, address eater, uint suggestedEateryID);
 
-  // When an eatery gets another vote
+  // When an eatery gets a vote
   event EateryVoted(uint decisionTime, address eater, uint eateryID);
 
   // When an eating is decided
   event EatingDecided(uint decisionTime, uint eateryID, address winningEater);
 
-  // When an eating is cancelled because not enough eaters joined
-  // or because no eatery received more than 1 vote
+  // When an eating is cancelled (because not enough eaters joined
+  // or because no eatery received more than 1 vote)
   event EatingCancelled(uint decisionTime);
 
   constructor (
     string _name,
-    uint _minProposalTimeSec
+    int _utcOffsetHours,
+    uint _minDecisionTimeSec
   )
     public
   {
+    require(_utcOffsetHours >= -12 && _utcOffsetHours <= 14,
+      "Invaild UTC offset.");
     name = _name;
-    minProposalTimeSec = _minProposalTimeSec;
+    utcOffsetHours = _utcOffsetHours;
+    minDecisionTimeSec = _minDecisionTimeSec;
     eateries = new Eateries();
     eaters = new Eaters(msg.sender);
   }
@@ -91,7 +99,7 @@ contract DLunch {
 
   modifier validEateryID (uint eateryID)
   {
-    require(eateries.isValidEateryID(eateryID), "Unknown eatery.");
+    require(eateries.isValidEateryID(eateryID), "Invalid eatery ID.");
     _;
   }
 
@@ -109,12 +117,27 @@ contract DLunch {
     _;
   }
 
+  modifier joinedEating (uint decisionTime)
+  {
+    require(eatings[decisionTime].eaterFreeVoteCount[msg.sender] > 0,
+      "You have not joined this eating yet.");
+    _;
+  }
+
   function checkMyBalance ()
     external
     view
     returns(uint)
   {
     return eaterBalance[msg.sender];
+  }
+
+  function timestampToDay(uint timestamp)
+    internal
+    view
+    returns(uint)
+  {
+    return uint(int(timestamp) + utcOffsetHours * 3600) / 86400;
   }
 
   function proposeEating (
@@ -124,16 +147,23 @@ contract DLunch {
     external
     registeredEater(msg.sender)
   {
-    require(eatings[decisionTime].closingTime == 0,
+    require(eatings[decisionTime].state == EatingState.Unknown,
       "Eating already proposed for this time.");
     require(closingTime >= decisionTime,
-      "Closing time should be the same or later than decision time.");
-    require(decisionTime >= block.timestamp + minProposalTimeSec,
+      "Closing time should be greater than or equals to decision time.");
+    require(decisionTime >= block.timestamp + minDecisionTimeSec,
       "Decision time is too soon.");
     require(closingTime - decisionTime <= maxClosingTimeSec,
-      "Closing time is too late.");
+      "Closing time is too far away.");
 
+    uint day = timestampToDay(decisionTime);
+
+    require(numEatings[day] + 1 <= maxEatingsPerDay,
+      "Maximum number of eatings reached for this day.");
+
+    numEatings[day] += 1;
     eatings[decisionTime] = Eating(closingTime, EatingState.Open, 0, 0, 0);
+
     emit NewEating(decisionTime, closingTime);
   }
 
@@ -144,8 +174,16 @@ contract DLunch {
     returns(uint, uint, uint, uint)
   {
     Eating storage eating = eatings[decisionTime];
-    return(eating.closingTime, eating.winningEateryID, eating.winningDistance,
+    return(eating.closingTime, eating.winningEateryID, eating.winningEateryDist,
       eating.numEaters);
+  }
+
+  function freeVoteIndex(uint eateryID)
+    internal
+    view
+    returns(bytes32)
+  {
+    return keccak256(abi.encodePacked(msg.sender, eateryID));
   }
 
   function joinEating (uint decisionTime, uint suggestedEateryID)
@@ -156,37 +194,38 @@ contract DLunch {
     validEateryID(suggestedEateryID)
   {
     Eating storage eating = eatings[decisionTime];
-    require(eating.numFreeVotes[msg.sender] == 0,
+    require(eating.eaterFreeVoteCount[msg.sender] == 0,
       "You already joined this eating.");
 
     eating.numEaters += 1;
-    eating.numFreeVotes[msg.sender] = 1;
-    if (eating.votes[suggestedEateryID] == 0) {
-      // Eatery hasn't been suggested yet
-      eating.proposer[suggestedEateryID] = msg.sender;
-    }
-    eating.votes[suggestedEateryID] += 1;
-
-    // Update winning eatery if suggested has more votes
-    // or same number of votes but closer
-    updateWinningEatery(eating, suggestedEateryID);
+    eating.eaterFreeVoteCount[msg.sender] = 1;
+    eating.eaterToEateryFreeVote[freeVoteIndex(suggestedEateryID)] = true;
+    recordEateryVote(eating, suggestedEateryID);
 
     emit EaterJoined(decisionTime, msg.sender, suggestedEateryID);
   }
 
-  function updateWinningEatery (Eating storage eating, uint suggestedEateryID)
+  function recordEateryVote (Eating storage eating, uint votedEateryID)
     internal
   {
-    uint winningVotes = eating.votes[eating.winningEateryID];
+    if (eating.eateryVoteCount[votedEateryID] == 0) {
+      // Eatery hasn't been suggested yet, keep track of who suggested it
+      eating.eateryProposer[votedEateryID] = msg.sender;
+    }
 
-    if (eating.votes[suggestedEateryID] > winningVotes) {
-      eating.winningEateryID = suggestedEateryID;
-      eating.winningDistance = eateries.getEateryDistance(suggestedEateryID);
-    } else if (eating.votes[suggestedEateryID] == winningVotes) {
-      uint suggestedDistance = eateries.getEateryDistance(suggestedEateryID);
-      if (suggestedDistance < eating.winningDistance) {
-        eating.winningEateryID = suggestedEateryID;
-        eating.winningDistance = suggestedDistance;
+    // Update vote count
+    eating.eateryVoteCount[votedEateryID] += 1;
+
+    uint votes = eating.eateryVoteCount[votedEateryID];
+    uint winningVotes = eating.eateryVoteCount[eating.winningEateryID];
+
+    if (votes >= winningVotes) {
+      uint votedDist = eateries.getEateryDistance(votedEateryID);
+      if (votes > winningVotes || votedDist < eating.winningEateryDist) {
+        // The voted eatery now has more votes, or
+        // has same number of votes but it's closer
+        eating.winningEateryID = votedEateryID;
+        eating.winningEateryDist = votedDist;
       }
     }
   }
@@ -197,26 +236,20 @@ contract DLunch {
     eatingOpen(decisionTime)
     beforeClosingTime(decisionTime)
     validEateryID(suggestedEateryID)
+    joinedEating(decisionTime)
   {
     Eating storage eating = eatings[decisionTime];
-    require(eating.numFreeVotes[msg.sender] > 0,
-      "You have not joined this eating yet.");
 
-    require(eating.numFreeVotes[msg.sender] + 1 < eating.numEaters,
+    require(eating.eaterFreeVoteCount[msg.sender] + 1 < eating.numEaters,
       "No free votes currently available to you for this eating.");
 
-    // TODO: prevent voting for an eatery this eater already voted for
+    bytes32 idx = freeVoteIndex(suggestedEateryID);
+    require(eating.eaterToEateryFreeVote[idx] == false,
+      "You cannot vote multiple times on the same eatery for free.");
 
-    eating.numFreeVotes[msg.sender] += 1;
-    if (eating.votes[suggestedEateryID] == 0) {
-      // Eatery hasn't been suggested yet
-      eating.proposer[suggestedEateryID] = msg.sender;
-    }
-    eating.votes[suggestedEateryID] += 1;
-
-    // Update winning eatery if upvoted has more votes
-    // or same number of votes but closer
-    updateWinningEatery(eating, suggestedEateryID);
+    eating.eaterFreeVoteCount[msg.sender] += 1;
+    eating.eaterToEateryFreeVote[idx] = true;
+    recordEateryVote(eating, suggestedEateryID);
 
     emit EateryVoted(decisionTime, msg.sender, suggestedEateryID);
   }
@@ -227,24 +260,13 @@ contract DLunch {
     eatingOpen(decisionTime)
     beforeClosingTime(decisionTime)
     validEateryID(suggestedEateryID)
+    joinedEating(decisionTime)
   {
-    // Require balance to upvote
     require(eaterBalance[msg.sender] >= paidVoteCost,
-      "Insufficient balance of EaterTokens for extra vote.");
+      "Insufficient balance of Eater tokens for paid vote.");
 
-    // reduce balance
     eaterBalance[msg.sender] -= paidVoteCost;
-
-    Eating storage eating = eatings[decisionTime];
-    if (eating.votes[suggestedEateryID] == 0) {
-      // Eatery hasn't been suggested yet
-      eating.proposer[suggestedEateryID] = msg.sender;
-    }
-    eating.votes[suggestedEateryID] += 1;
-
-    // Update winning eatery if upvoted has more votes
-    // or same number of votes but closer
-    updateWinningEatery(eating, suggestedEateryID);
+    recordEateryVote(eatings[decisionTime], suggestedEateryID);
 
     emit EateryVoted(decisionTime, msg.sender, suggestedEateryID);
   }
@@ -255,24 +277,25 @@ contract DLunch {
     registeredEater(msg.sender)
     eatingOpen(decisionTime)
     beforeClosingTime(decisionTime)
+    joinedEating(decisionTime)
     returns(uint, uint)
   {
     Eating storage eating = eatings[decisionTime];
     uint freeVotes = eating.numEaters <= 2 ? 1 : eating.numEaters - 1;
-
-    return(freeVotes, freeVotes - eating.numFreeVotes[msg.sender]);
+    return(freeVotes, freeVotes - eating.eaterFreeVoteCount[msg.sender]);
   }
 
   function decideEating (uint decisionTime)
     external
     registeredEater(msg.sender)
     eatingOpen(decisionTime)
+    joinedEating(decisionTime)
   {
     Eating storage eating = eatings[decisionTime];
     require(block.timestamp >= decisionTime, "Decision time not reached.");
 
     bool canBeDecided = (eating.numEaters >= minNumEaters) &&
-      (eating.votes[eating.winningEateryID] > 1);
+      (eating.eateryVoteCount[eating.winningEateryID] > 1);
 
     if (block.timestamp > eating.closingTime && !canBeDecided) {
       eating.state = EatingState.Cancelled;
@@ -280,13 +303,14 @@ contract DLunch {
     } else {
       require(eating.numEaters >= minNumEaters,
         "Not enough eaters joined.");
-      require(eating.votes[eating.winningEateryID] > 1,
+      require(eating.eateryVoteCount[eating.winningEateryID] > 1,
         "No eatery has received more than 1 vote yet.");
 
-      // Add token to winning eater
-      address winner = eating.proposer[eating.winningEateryID];
+      // Add Eater token to winning eater
+      address winner = eating.eateryProposer[eating.winningEateryID];
       eaterBalance[winner] += 1;
       eating.state = EatingState.Decided;
+
       emit EatingDecided(decisionTime, eating.winningEateryID, winner);
     }
   }
@@ -299,6 +323,7 @@ contract DLunch {
     Eating storage eating = eatings[decisionTime];
     require(eating.state == EatingState.Decided, "Eating not decided.");
 
-    return(eating.winningEateryID, eating.proposer[eating.winningEateryID]);
+    return(eating.winningEateryID,
+      eating.eateryProposer[eating.winningEateryID]);
   }
 }
