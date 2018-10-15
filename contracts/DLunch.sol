@@ -58,6 +58,9 @@ contract DLunch {
   // Number of eating events proposed in a day
   mapping (uint => uint) numEatings;
 
+  // Last day an eatery won an eating event
+  mapping (uint => uint) lastEatingDay;
+
   // When a new eating is proposed
   event NewEating(uint decisionTime, uint closingTime);
 

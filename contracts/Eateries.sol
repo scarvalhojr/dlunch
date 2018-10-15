@@ -2,9 +2,24 @@ pragma solidity ^0.4.23;
 
 contract Eateries {
 
+  address public owner;
+
+  enum RepeatBan {
+    OneDay,
+    OneWeek,
+    TwoWeeks,
+    OneMonth,
+    TwoMonths,
+    SixMonths
+  }
+
+  uint[] banDays = [1, 7, 14, 30, 60, 180];
+
   struct Eatery {
-    string  name;
-    uint    distMeters;
+    string name;
+    uint distMeters;
+    uint lastEating;
+    RepeatBan repeatBan;
   }
 
   // List of registered eateries
@@ -15,6 +30,8 @@ contract Eateries {
 
   constructor () public
   {
+    owner = msg.sender;
+
     // 0 is not a valid eatery ID
     eateries.push(Eatery("Nowhere", 0));
   }
@@ -30,7 +47,8 @@ contract Eateries {
   function addEatery (string name, uint distMeters)
     external
   {
-    uint eatingID = eateries.push(Eatery(name, distMeters)) - 1;
+    uint eatingID = eateries.push(Eatery(name, distMeters, 0,
+      RepeatBan.OneDay)) - 1;
     emit NewEatery(eatingID);
   }
 
